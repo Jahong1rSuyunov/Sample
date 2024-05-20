@@ -77,6 +77,8 @@ namespace Sample
 
             using (HttpClient client = new HttpClient())
             {
+
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("YourAppName/1.0 (your-email@example.com)");
                 try
                 {
                     byte[] tileData = await client.GetByteArrayAsync(url);
