@@ -1,9 +1,5 @@
 ﻿using MaxRev.Gdal.Core;
-using Newtonsoft.Json.Linq;
-using OSGeo.GDAL;
 using OSGeo.OGR;
-using OSGeo.OSR;
-using Sample;
 
 
 
@@ -14,7 +10,7 @@ Ogr.RegisterAll();
 
 
 
-var tileWriter = new tileWriter();
+var tileWriter = new TileWriter();
 await tileWriter.Run();
 
 
