@@ -1,6 +1,8 @@
 ﻿using BruTile;
 using BruTile.Predefined;
 using BruTile.Web;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
 
 
 namespace Sample
@@ -21,6 +23,8 @@ namespace Sample
             using HttpClient client = new HttpClient();
             client.DefaultRequestHeaders.UserAgent.ParseAdd("YourAppName/1.0 (your-email@example.com)");
 
+            var tasks = new ConcurrentBag<Task>();
+
             for (int zoom = 0; zoom <= 17; zoom++)
             {
                 int minTileX = LonToTileX(minLon, zoom);
@@ -37,33 +41,39 @@ namespace Sample
 
                         if (uri != null)
                         {
-                            string url = uri.ToString();
-
-                            try
-                            {
-                                byte[] tileData = await client.GetByteArrayAsync(url);
-
-                                string directoryPath = Path.Combine("tiles", zoom.ToString(), x.ToString());
-                                Directory.CreateDirectory(directoryPath);
-
-                                string fileName = Path.Combine(directoryPath, $"{y}.png");
-                                await File.WriteAllBytesAsync(fileName, tileData);
-
-                                Console.WriteLine($"Downloaded {fileName}");
-                            }
-                            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
-                            {
-                                Console.WriteLine($"Access forbidden for tile {zoom}/{x}/{y}: {ex.Message}");
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"Failed to download tile {zoom}/{x}/{y}: {ex.Message}");
-                            }
+                            tasks.Add(DownloadTileAsync(client, uri, zoom, x, y));
                         }
                     }
                 }
             }
+            await Task.WhenAll(tasks);
+            Console.WriteLine("All tiles downloaded");
 
+        }
+
+        public async Task DownloadTileAsync(HttpClient client, Uri uri, int zoom, int x, int y)
+        {
+            string url = uri.ToString();
+            try
+            {
+                byte[] tileData = await client.GetByteArrayAsync(url);
+
+                string directoryPath = Path.Combine("tiles", zoom.ToString(), x.ToString());
+                Directory.CreateDirectory(directoryPath);
+
+                string fileName = Path.Combine(directoryPath, $"{y}.png");
+                await File.WriteAllBytesAsync(fileName, tileData);
+
+                Console.WriteLine($"Downloaded {fileName}");
+            }
+            catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                Console.WriteLine($"Access forbidden for tile {zoom}/{x}/{y}: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to download tile {zoom}/{x}/{y}: {ex.Message}");
+            }
         }
 
         public int LonToTileX(double lon, int zoom)
