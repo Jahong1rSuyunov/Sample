@@ -1,17 +1,16 @@
 ﻿using MaxRev.Gdal.Core;
-using OSGeo.OGR;
+using OSGeo.GDAL;
 
 
 
 
 // Initialize GDAL
-GdalBase.ConfigureAll();
-Ogr.RegisterAll();
-
+//GdalBase.ConfigureAll();
+//Ogr.RegisterAll();
 
 
 var tileWriter = new TileWriter();
-await tileWriter.Run();
+await tileWriter.DownloadTiles();
 
 
 //// Your GeoJSON data

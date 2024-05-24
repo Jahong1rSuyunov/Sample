@@ -1,24 +1,44 @@
 ﻿using System;
-using System.Data.SQLite;
+using System.Drawing;
 using System.IO;
 using System.Net.Http;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
 using System.Threading;
+using OSGeo.GDAL;
+using OSGeo.OGR;
+using MaxRev.Gdal.Core;
 
 public class TileWriter
 {
     private static readonly HttpClient client = new HttpClient();
-    private static SemaphoreSlim semaphore = new SemaphoreSlim(20); // 20 parallel yuklash
+    private static SemaphoreSlim semaphore = new SemaphoreSlim(20); // 20 parallel downloads
     private const int TileSize = 256;
+
+    private readonly Dataset _geoPackage;
+    private readonly double _minLon;
+    private readonly double _minLat;
+    private readonly double _maxLon;
+    private readonly double _maxLat;
 
     public TileWriter()
     {
         client.DefaultRequestHeaders.UserAgent.ParseAdd("YourAppName/1.0 (your-email@example.com)");
+        GdalBase.ConfigureAll(); // Initialize GDAL
+        Gdal.AllRegister(); // Register all GDAL drivers
+
+        _minLon = 41.248;
+        _minLat = 69.194;
+        _maxLon = 41.319;
+        _maxLat = 69.273;
+        var gpkgDriver = Gdal.GetDriverByName("GPKG");
+        int maxTiles = 1 << 18; // 2^18 tile count
+        int fullSize = TileSize * maxTiles;
+        _geoPackage = gpkgDriver.Create("tile.gpkg", fullSize, fullSize, 4, DataType.GDT_Byte, null);
     }
-    public async Task Run()
+
+    public async Task DownloadTiles()
     {
-        // GeoPackage yaratish
         string gpkgFile = "tiles.gpkg";
         if (File.Exists(gpkgFile))
         {
@@ -27,7 +47,6 @@ public class TileWriter
 
         CreateGeoPackage(gpkgFile);
 
-        // Chilonzor district bounding box coordinates
         double minLat = 41.248; // Minimum latitude of the bounding box
         double minLon = 69.194; // Minimum longitude of the bounding box
         double maxLat = 41.319; // Maximum latitude of the bounding box
@@ -35,20 +54,30 @@ public class TileWriter
 
         var tasks = new ConcurrentBag<Task>();
 
+        int maxTiles = 1 << 18; // 2^18 tile count
+        int fullSize = TileSize * maxTiles;
+        double[] adfGeoTransform = new double[6];
+        adfGeoTransform[0] = minLon;
+        adfGeoTransform[1] = (maxLon - minLon) / fullSize;
+        adfGeoTransform[2] = 0;
+        adfGeoTransform[3] = maxLat;
+        adfGeoTransform[4] = 0;
+        adfGeoTransform[5] = -(maxLat - minLat) / fullSize;
+
+        _geoPackage.SetGeoTransform(adfGeoTransform);
+
         for (int zoom = 0; zoom <= 17; zoom++)
         {
             int minTileX = LonToTileX(minLon, zoom);
             int maxTileX = LonToTileX(maxLon, zoom);
-            int minTileY = LatToTileY(maxLat, zoom); // Note: maxLat here
-            int maxTileY = LatToTileY(minLat, zoom); // Note: minLat here
+            int minTileY = LatToTileY(maxLat, zoom);
+            int maxTileY = LatToTileY(minLat, zoom);
 
             for (int x = minTileX; x <= maxTileX; x++)
             {
                 for (int y = minTileY; y <= maxTileY; y++)
                 {
-                    var tileIndex = new TileIndex(x, y, zoom);
                     Uri uri = new Uri($"https://tile.openstreetmap.org/{zoom}/{x}/{y}.png");
-
                     if (uri != null)
                     {
                         tasks.Add(DownloadAndSaveTileAsync(uri, zoom, x, y, gpkgFile));
@@ -61,86 +90,6 @@ public class TileWriter
         Console.WriteLine("All tiles downloaded and saved to GeoPackage");
     }
 
-    private void CreateGeoPackage(string gpkgFile)
-    {
-        using (var connection = new SQLiteConnection($"Data Source={gpkgFile}; Version=3;"))
-        {
-            connection.Open();
-
-            var command = connection.CreateCommand();
-            command.CommandText = @"
-                CREATE TABLE gpkg_spatial_ref_sys (
-                    srs_name TEXT NOT NULL,
-                    srs_id INTEGER NOT NULL PRIMARY KEY,
-                    organization TEXT NOT NULL,
-                    organization_coordsys_id INTEGER NOT NULL,
-                    definition TEXT NOT NULL,
-                    description TEXT
-                );
-
-                INSERT INTO gpkg_spatial_ref_sys (srs_name, srs_id, organization, organization_coordsys_id, definition, description)
-                VALUES ('WGS 84', 4326, 'EPSG', 4326, 'GEOGCS[""WGS 84"",DATUM[""WGS_1984"",SPHEROID[""WGS 84"",6378137,298.257223563]],PRIMEM[""Greenwich"",0],UNIT[""degree"",0.0174532925199433]]', 'WGS 84');
-
-                CREATE TABLE gpkg_contents (
-                    table_name TEXT NOT NULL PRIMARY KEY,
-                    data_type TEXT NOT NULL,
-                    identifier TEXT UNIQUE,
-                    description TEXT DEFAULT '',
-                    last_change DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
-                    min_x DOUBLE,
-                    min_y DOUBLE,
-                    max_x DOUBLE,
-                    max_y DOUBLE,
-                    srs_id INTEGER,
-                    CONSTRAINT fk_gc_r_srs_id FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
-                );
-
-                CREATE TABLE gpkg_tile_matrix_set (
-                    table_name TEXT NOT NULL PRIMARY KEY,
-                    srs_id INTEGER NOT NULL,
-                    min_x DOUBLE NOT NULL,
-                    min_y DOUBLE NOT NULL,
-                    max_x DOUBLE NOT NULL,
-                    max_y DOUBLE NOT NULL,
-                    CONSTRAINT fk_gtms_table_name FOREIGN KEY (table_name) REFERENCES gpkg_contents(table_name),
-                    CONSTRAINT fk_gtms_srs FOREIGN KEY (srs_id) REFERENCES gpkg_spatial_ref_sys(srs_id)
-                );
-
-                CREATE TABLE gpkg_tile_matrix (
-                    table_name TEXT NOT NULL,
-                    zoom_level INTEGER NOT NULL,
-                    matrix_width INTEGER NOT NULL,
-                    matrix_height INTEGER NOT NULL,
-                    tile_width INTEGER NOT NULL,
-                    tile_height INTEGER NOT NULL,
-                    pixel_x_size DOUBLE NOT NULL,
-                    pixel_y_size DOUBLE NOT NULL,
-                    CONSTRAINT pk_ttm PRIMARY KEY (table_name, zoom_level),
-                    CONSTRAINT fk_tmm_table_name FOREIGN KEY (table_name) REFERENCES gpkg_contents(table_name)
-                );
-
-                CREATE TABLE tiles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    zoom_level INTEGER NOT NULL,
-                    tile_column INTEGER NOT NULL,
-                    tile_row INTEGER NOT NULL,
-                    tile_data BLOB NOT NULL,
-                    UNIQUE (zoom_level, tile_column, tile_row)
-                );
-
-                INSERT INTO gpkg_contents (table_name, data_type, identifier, description, min_x, min_y, max_x, max_y, srs_id)
-                VALUES ('tiles', 'tiles', 'tiles', '', -180.0, -85.0511287798066, 180.0, 85.0511287798066, 4326);
-
-                INSERT INTO gpkg_tile_matrix_set (table_name, srs_id, min_x, min_y, max_x, max_y)
-                VALUES ('tiles', 4326, -20037508.342789244, -20037508.342789244, 20037508.342789244, 20037508.342789244);
-
-                INSERT INTO gpkg_tile_matrix (table_name, zoom_level, matrix_width, matrix_height, tile_width, tile_height, pixel_x_size, pixel_y_size)
-                VALUES ('tiles', 0, 1, 1, 256, 256, 156543.03392804097, 156543.03392804097);
-            ";
-            command.ExecuteNonQuery();
-        }
-    }
-
     private async Task DownloadAndSaveTileAsync(Uri uri, int zoom, int x, int y, string gpkgFile)
     {
         await semaphore.WaitAsync();
@@ -148,9 +97,11 @@ public class TileWriter
         try
         {
             byte[] tileData = await client.GetByteArrayAsync(url);
-
-            // Tile ni GeoPackage ga yozish
-            SaveTileToGeoPackage(tileData, zoom, x, y, gpkgFile);
+            using (var ms = new MemoryStream(tileData))
+            {
+                Bitmap bitmap = new Bitmap(ms);
+                SaveTileToGeoPackage(bitmap, zoom, x, y, gpkgFile);
+            }
 
             Console.WriteLine($"Downloaded and saved tile {zoom}/{x}/{y} to GeoPackage");
         }
@@ -168,24 +119,51 @@ public class TileWriter
         }
     }
 
-    private void SaveTileToGeoPackage(byte[] tileData, int zoom, int x, int y, string gpkgFile)
+    private void SaveTileToGeoPackage(Bitmap bitmap, int zoom, int tileX, int tileY, string gpkgFile)
     {
-        using (var connection = new SQLiteConnection($"Data Source={gpkgFile}; Version=3;"))
+        int _tileSize = 256;
+        int pixelX = tileX * _tileSize;
+        int pixelY = tileY * _tileSize;
+
+        for (int y = 0; y < bitmap.Height; y++)
         {
-            connection.Open();
+            for (int x = 0; x < bitmap.Width; x++)
+            {
+                Color pixelColor = bitmap.GetPixel(x, y);
+                int[] pixelValues = new int[] { pixelColor.R, pixelColor.G, pixelColor.B, pixelColor.A };
 
-            var command = connection.CreateCommand();
-            command.CommandText = @"
-                INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data)
-                VALUES (@zoom_level, @tile_column, @tile_row, @tile_data);
-            ";
+                for (int band = 1; band <= 4; band++)
+                {
+                    Band dstBand = _geoPackage.GetRasterBand(band);
+                    dstBand.WriteRaster(pixelX + x, pixelY + y, 1, 1, new int[] { pixelValues[band - 1] }, 1, 1, 0, 0);
+                    Console.WriteLine("succses");
+                }
+            }
+        }
+    }
 
-            command.Parameters.AddWithValue("@zoom_level", zoom);
-            command.Parameters.AddWithValue("@tile_column", x);
-            command.Parameters.AddWithValue("@tile_row", y);
-            command.Parameters.AddWithValue("@tile_data", tileData);
+    private void CreateGeoPackage(string gpkgFile)
+    {
+        var driver = Gdal.GetDriverByName("GPKG");
+        if (driver == null)
+        {
+            throw new Exception("GPKG driver is not available.");
+        }
 
-            command.ExecuteNonQuery();
+        using (Dataset dataset = driver.Create(gpkgFile, 0, 0, 0, DataType.GDT_Unknown, null))
+        {
+            if (dataset == null)
+            {
+                throw new Exception("Failed to create GeoPackage.");
+            }
+
+            // Create the necessary tables and metadata for GeoPackage tiles
+            //Layer layer = dataset.CreateLayer("tiles", null, wkbGeometryType.wkbUnknown, null);
+            //if (layer == null)
+            //{
+            //    throw new Exception("Layer creation failed.");
+            //}
+            
         }
     }
 
